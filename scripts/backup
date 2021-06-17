@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Based on cookiecutter-django template
+# https://github.com/pydanny/cookiecutter-django/blob/master/%7B%7Bcookiecutter.project_slug%7D%7D/compose/production/postgres/maintenance/_sourced/messages.sh
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+
+working_dir="$(dirname ${0})"
+source "${working_dir}/_sourced/messages.sh"
+
+
+message_welcome "Backing up the '${POSTGRES_DB}' database..."
+
+
+if [[ "${POSTGRES_USER}" == "postgres" ]]; then
+    message_error "Backing up as 'postgres' user is not supported. Assign 'POSTGRES_USER' env with another one and try again."
+    exit 1
+fi
+
+export PGHOST="${POSTGRES_HOST}"
+export PGPORT="${POSTGRES_PORT}"
+export PGUSER="${POSTGRES_USER}"
+export PGPASSWORD="${POSTGRES_PASSWORD}"
+export PGDATABASE="${POSTGRES_DB}"  
+
+random_nonce="$(openssl rand -hex 6)"
+timestamp="$(date +'%Y_%m_%dT%H_%M_%S')"
+backup_directory="${timestamp}_${random_nonce}"
+backup_filename="${backup_directory}/backup_${timestamp}_${random_nonce}.gz"
+checksum_filename="${backup_filename}.sha256"
+unique_passphrase_file_path="${backup_filename}.pass"
+
+# Create backup directory
+mkdir "${backup_directory}"
+
+
+# Generate a unique passphrase for encrypting the databse dump
+openssl rand -hex 128 > "${unique_passphrase_file_path}"
+
+# Dump database
+pg_dump -O -x --exclude-table-data vehicles_tripwaypoint -v | gzip > "${backup_filename}"
+sha256sum "${backup_filename}" > "${checksum_filename}"
+
+# Encrypt the databse dump using the unique private key
+cat "${unique_passphrase_file_path}" | gpg --passphrase-fd 0 --batch --yes --output "${backup_filename}.enc" --symmetric --cipher-algo AES256 "${backup_filename}"
+rm "${backup_filename}"
+
+# Encrypt the unique passphrase
+public_encryption_key_path="public_encryption_key.key"
+echo ${ENCRYPTION_PUBLIC_KEY} | base64 -d > "${public_encryption_key_path}"
+private_encryption_key_path="private_encryption_key.key"
+echo ${ENCRYPTION_PRIVATE_KEY} | base64 -d > "${private_encryption_key_path}"
+encription_passphrase="${ENCRYPTION_PASSPHRASE}"
+openssl rsautl -encrypt -inkey "${public_encryption_key_path}" -pubin -in "${unique_passphrase_file_path}" -out "${unique_passphrase_file_path}.enc"
+rm -f "${unique_passphrase_file_path}"
+
+# Upload encrypted unique passphrase, encrypted database dump and checksum, zipped
+tar c -zvf "${backup_directory}.tar.gz" "${backup_directory}"
+set +e
+gsutil cp "${backup_directory}.tar.gz" "gs://${GOOGLE_BUCKET_NAME}${DATABASE_BACKUP_PATH}"; exit_code=$?
+set -e
+
+# Cleanup
+rm -f "${public_encryption_key_path}"
+rm -f "${private_encryption_key_path}"
+rm -rf ${backup_directory}
+rm -f "${backup_directory}.tar.gz"
+
+if [ $exit_code -ne 0 ]; then
+    message_error "'${POSTGRES_DB}' database backup '${backup_directory}.tar.gz' has been created but upload failed."
+else
+    message_success "'${POSTGRES_DB}' database backup '${backup_directory}.tar.gz' has been created and uploaded."
+fi;

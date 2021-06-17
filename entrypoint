@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+if [[ -z $GOOGLE_CREDENTIALS ]]; then
+    echo "Google SDK credentials not set. Ensure GOOGLE_CREDENTIALS contains a valid, B64 encoded, service account key."
+    exit 1
+fi
+
+if [[ -z $GOOGLE_BUCKET_NAME ]]; then
+    echo "Google Storage bucket name not set. Ensure GOOGLE_BUCKET_NAME contains a valid bucket name."
+    exit 1
+fi
+
+if [[ -z $DATABASE_BACKUP_PATH ]]; then
+    echo "Database backups path not set. Ensure DATABASE_BACKUP_PATH contains a valid path for database backups."
+    exit 1
+fi
+
+# Setup Google SDK credentials
+echo $GOOGLE_CREDENTIALS | base64 -d > /google_credentials.json
+export GOOGLE_APPLICATION_CREDENTIALS=/google_credentials.json
+gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS
+
+exec "$@"

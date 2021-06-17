@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Based on cookiecutter-django template
+# https://github.com/pydanny/cookiecutter-django/blob/master/%7B%7Bcookiecutter.project_slug%7D%7D/compose/production/postgres/maintenance/_sourced/messages.sh
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+
+working_dir="$(dirname ${0})"
+source "${working_dir}/_sourced/messages.sh"
+
+
+if [[ -z ${1+x} ]]; then
+    message_error "Backup filename is not specified yet it is a required parameter. Make sure you provide one and try again."
+    exit 1
+fi
+
+backup_remote_full_path="gs://${GOOGLE_BUCKET_NAME}${DATABASE_BACKUP_PATH}${1}.tar.gz"
+echo $backup_remote_full_path
+
+if ! gsutil -q stat "${backup_remote_full_path}"; then
+    message_error "No backup with the specified filename found. Check out the 'backups' scripts script output to see if there is one and try again."
+    exit 1
+fi
+
+message_welcome "Restoring the '${POSTGRES_DB}' database from the '${1}' backup..."
+
+if [[ "${POSTGRES_USER}" == "postgres" ]]; then
+    message_error "Restoring as 'postgres' user is not supported. Assign 'POSTGRES_USER' env with another one and try again."
+    exit 1
+fi
+
+export PGHOST="${POSTGRES_HOST}"
+export PGPORT="${POSTGRES_PORT}"
+export PGUSER="${POSTGRES_USER}"
+export PGPASSWORD="${POSTGRES_PASSWORD}"
+export PGDATABASE="${POSTGRES_DB}"
+
+
+message_info "Downloading backup file..."
+gsutil cp "${backup_remote_full_path}" .
+
+message_info "Unzipping backup file..."
+tar x -zvf "${1}.tar.gz"
+rm -r "${1}.tar.gz"
+
+backup_directory="${1}"
+encrypted_backup_filename="${backup_directory}/backup_${1}.gz.enc"
+decrypted_backup_filename="${backup_directory}/backup_${1}.gz"
+encrypted_pass_filename="${backup_directory}/backup_${1}.gz.pass.enc"
+checksum_filename="${backup_directory}/backup_${1}.gz.sha256"
+
+message_info "Decrypting passphrase..."
+private_encryption_key_path="private_encryption_key.key"
+echo ${ENCRYPTION_PRIVATE_KEY} | base64 -d > "${private_encryption_key_path}"
+encription_passphrase="${ENCRYPTION_PASSPHRASE}"
+openssl rsautl -decrypt -inkey "${private_encryption_key_path}" -in "${encrypted_pass_filename}" -out "${encrypted_pass_filename}.dec"
+
+message_info "Decrypting backup file..."
+cat "${encrypted_pass_filename}.dec" | gpg --passphrase-fd 0 --batch --yes --output "${decrypted_backup_filename}" --decrypt "${encrypted_backup_filename}"
+
+message_info "Validating checksum..."
+if ! cat "${checksum_filename}" | sha256sum -c; then
+    message_error "Backup SHA256 checksum invalid!"
+    exit 1
+fi
+
+message_info "Dropping the database..."
+dropdb "${PGDATABASE}"
+
+message_info "Creating a new database..."
+createdb --owner="${POSTGRES_USER}" "${PGDATABASE}"
+
+message_info "Applying the backup to the new database..."
+gunzip -c "${decrypted_backup_filename}" | psql "${POSTGRES_DB}"
+
+message_info "Cleaning up..."
+rm -f "${private_encryption_key_path}"
+rm -rf "${backup_directory}"
+
+message_success "The '${POSTGRES_DB}' database has been restored from the '${1}' backup."

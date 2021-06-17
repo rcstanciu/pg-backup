@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Based on cookiecutter-django template
+# https://github.com/pydanny/cookiecutter-django/blob/master/%7B%7Bcookiecutter.project_slug%7D%7D/compose/production/postgres/maintenance/_sourced/messages.sh
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+
+working_dir="$(dirname ${0})"
+source "${working_dir}/_sourced/messages.sh"
+
+
+message_welcome "These are the backups you have got:"
+backups_path="gs://${GOOGLE_BUCKET_NAME}${DATABASE_BACKUP_PATH}"
+escaped_backups_path="$(echo $backups_path | sed 's/\//\\\//g')"
+
+gsutil ls -lh "${backups_path}" | grep gs:// | sed "s/$escaped_backups_path//g" | sed 's/.tar.gz//g' | sort -r -k 2
